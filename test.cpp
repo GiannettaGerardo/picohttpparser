@@ -1,4 +1,4 @@
-/* use `make test` to run the test */
+/* Use the build.sh script to build "bench" and "test" files. */
 /*
  * Copyright (c) 2009-2014 Kazuho Oku, Tokuhiro Matsuno, Daisuke Murase,
  *                         Shigeo Mitsunari
@@ -32,91 +32,83 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include "picotest/picotest.h"
-#include "picohttpparser.h"
+#include "picohttpparser.hpp"
 
 static int bufis(const char *s, size_t l, const char *t)
 {
     return strlen(t) == l && memcmp(s, t, l) == 0;
 }
 
+static int bufis(std::string_view& view, const char *t)
+{
+    return strlen(t) == view.size() && memcmp(view.data(), t, view.size()) == 0;
+}
+
 static char *inputbuf; /* point to the end of the buffer */
 
 static void test_request(void)
 {
-    const char *method;
+    /*const char *method;
     size_t method_len;
     const char *path;
     size_t path_len;
     int minor_version;
     struct phr_header headers[4];
-    size_t num_headers;
+    size_t num_headers;*/
+    HttpRequest request(4, 100);
 
 #define PARSE(s, last_len, exp, comment)                                                                                           \
     do {                                                                                                                           \
         size_t slen = sizeof(s) - 1;                                                                                               \
+        request.buffer_len = slen;                                                                                                 \
+        request.prev_buffer_len = last_len;                                                                                        \
         note(comment);                                                                                                             \
-        num_headers = sizeof(headers) / sizeof(headers[0]);                                                                        \
-        memcpy(inputbuf - slen, s, slen);                                                                                          \
-        ok(phr_parse_request(inputbuf - slen, slen, &method, &method_len, &path, &path_len, &minor_version, headers, &num_headers, \
-                             last_len) == (exp == 0 ? (int)slen : exp));                                                           \
+        memcpy(request.buffer.data(), s, slen);                                                                                    \
+        ok(phr_parse_request(request) == (exp == 0 ? (int)slen : exp));                                                            \
     } while (0)
 
     PARSE("GET / HTTP/1.0\r\n\r\n", 0, 0, "simple");
-    ok(num_headers == 0);
-    ok(bufis(method, method_len, "GET"));
-    ok(bufis(path, path_len, "/"));
-    ok(minor_version == 0);
+    ok(request.headers.size() == 0);
+    ok(bufis(request.method, "GET"));
+    ok(bufis(request.path, "/"));
+    ok(request.minor_version == 0);
 
     PARSE("GET / HTTP/1.0\r\n\r", 0, -2, "partial");
 
     PARSE("GET /hoge HTTP/1.1\r\nHost: example.com\r\nCookie: \r\n\r\n", 0, 0, "parse headers");
-    ok(num_headers == 2);
-    ok(bufis(method, method_len, "GET"));
-    ok(bufis(path, path_len, "/hoge"));
-    ok(minor_version == 1);
-    ok(bufis(headers[0].name, headers[0].name_len, "Host"));
-    ok(bufis(headers[0].value, headers[0].value_len, "example.com"));
-    ok(bufis(headers[1].name, headers[1].name_len, "Cookie"));
-    ok(bufis(headers[1].value, headers[1].value_len, ""));
+    ok(request.headers.size() == 2);
+    ok(bufis(request.method, "GET"));
+    ok(bufis(request.path, "/hoge"));
+    ok(request.minor_version == 1);
+    ok(bufis(request.headers["Host"], "example.com"));
+    ok(bufis(request.headers["Cookie"], ""));
 
     PARSE("GET /hoge HTTP/1.1\r\nHost: example.com\r\nUser-Agent: \343\201\262\343/1.0\r\n\r\n", 0, 0, "multibyte included");
-    ok(num_headers == 2);
-    ok(bufis(method, method_len, "GET"));
-    ok(bufis(path, path_len, "/hoge"));
-    ok(minor_version == 1);
-    ok(bufis(headers[0].name, headers[0].name_len, "Host"));
-    ok(bufis(headers[0].value, headers[0].value_len, "example.com"));
-    ok(bufis(headers[1].name, headers[1].name_len, "User-Agent"));
-    ok(bufis(headers[1].value, headers[1].value_len, "\343\201\262\343/1.0"));
+    ok(request.headers.size() == 2);
+    ok(bufis(request.method, "GET"));
+    ok(bufis(request.path, "/hoge"));
+    ok(request.minor_version == 1);
+    ok(bufis(request.headers["Host"], "example.com"));
+    ok(bufis(request.headers["User-Agent"], "\343\201\262\343/1.0"));
 
-    PARSE("GET / HTTP/1.0\r\nfoo: \r\nfoo: b\r\n  \tc\r\n\r\n", 0, 0, "parse multiline");
-    ok(num_headers == 3);
-    ok(bufis(method, method_len, "GET"));
-    ok(bufis(path, path_len, "/"));
-    ok(minor_version == 0);
-    ok(bufis(headers[0].name, headers[0].name_len, "foo"));
-    ok(bufis(headers[0].value, headers[0].value_len, ""));
-    ok(bufis(headers[1].name, headers[1].name_len, "foo"));
-    ok(bufis(headers[1].value, headers[1].value_len, "b"));
-    ok(headers[2].name == NULL);
-    ok(bufis(headers[2].value, headers[2].value_len, "  \tc"));
+    PARSE("GET / HTTP/1.0\r\nfoo: \r\nfoo: b\r\n  \tc\r\n\r\n", 0, -1, "parse multiline is not supported");
 
     PARSE("GET / HTTP/1.0\r\nfoo : ab\r\n\r\n", 0, -1, "parse header name with trailing space");
 
     PARSE("GET", 0, -2, "incomplete 1");
-    ok(method == NULL);
+    ok(request.method == "");
     PARSE("GET ", 0, -2, "incomplete 2");
-    ok(bufis(method, method_len, "GET"));
+    ok(bufis(request.method, "GET"));
     PARSE("GET /", 0, -2, "incomplete 3");
-    ok(path == NULL);
+    ok(request.path == "");
     PARSE("GET / ", 0, -2, "incomplete 4");
-    ok(bufis(path, path_len, "/"));
+    ok(bufis(request.path, "/"));
     PARSE("GET / H", 0, -2, "incomplete 5");
     PARSE("GET / HTTP/1.", 0, -2, "incomplete 6");
     PARSE("GET / HTTP/1.0", 0, -2, "incomplete 7");
-    ok(minor_version == -1);
+    ok(request.minor_version == -1);
     PARSE("GET / HTTP/1.0\r", 0, -2, "incomplete 8");
-    ok(minor_version == 0);
+    ok(request.minor_version == 0);
 
     PARSE("GET /hoge HTTP/1.0\r\n\r", strlen("GET /hoge HTTP/1.0\r\n\r") - 1, -2, "slowloris (incomplete)");
     PARSE("GET /hoge HTTP/1.0\r\n\r\n", strlen("GET /hoge HTTP/1.0\r\n\r\n") - 1, 0, "slowloris (complete)");
@@ -137,22 +129,20 @@ static void test_request(void)
     PARSE("GET / HTTP/1.0\r\nab: c\033\r\n\r\n", 0, -1, "CTL in header value");
     PARSE("GET / HTTP/1.0\r\n/: 1\r\n\r\n", 0, -1, "invalid char in header value");
     PARSE("GET /\xa0 HTTP/1.0\r\nh: c\xa2y\r\n\r\n", 0, 0, "accept MSB chars");
-    ok(num_headers == 1);
-    ok(bufis(method, method_len, "GET"));
-    ok(bufis(path, path_len, "/\xa0"));
-    ok(minor_version == 0);
-    ok(bufis(headers[0].name, headers[0].name_len, "h"));
-    ok(bufis(headers[0].value, headers[0].value_len, "c\xa2y"));
+    ok(request.headers.size() == 1);
+    ok(bufis(request.method, "GET"));
+    ok(bufis(request.path, "/\xa0"));
+    ok(request.minor_version == 0);
+    ok(bufis(request.headers["h"], "c\xa2y"));
 
     PARSE("GET / HTTP/1.0\r\n\x7c\x7e: 1\r\n\r\n", 0, 0, "accept |~ (though forbidden by SSE)");
-    ok(num_headers == 1);
-    ok(bufis(headers[0].name, headers[0].name_len, "\x7c\x7e"));
-    ok(bufis(headers[0].value, headers[0].value_len, "1"));
+    ok(request.headers.size() == 1);
+    ok(bufis(request.headers["\x7c\x7e"], "1"));
 
     PARSE("GET / HTTP/1.0\r\n\x7b: 1\r\n\r\n", 0, -1, "disallow {");
 
     PARSE("GET / HTTP/1.0\r\nfoo: a \t \r\n\r\n", 0, 0, "exclude leading and trailing spaces in header value");
-    ok(bufis(headers[0].value, headers[0].value_len, "a"));
+    ok(bufis(request.headers["foo"], "a"));
 
     PARSE("GET   /   HTTP/1.0\r\n\r\n", 0, 0, "accept multiple spaces between tokens");
 
@@ -329,7 +319,7 @@ static void test_chunked_at_once(int line, int consume_trailer, const char *enco
 static void test_chunked_per_byte(int line, int consume_trailer, const char *encoded, const char *decoded, ssize_t expected)
 {
     struct phr_chunked_decoder dec = {0};
-    char *buf = malloc(strlen(encoded) + 1);
+    char *buf = (char*)malloc(strlen(encoded) + 1);
     size_t bytes_to_consume = strlen(encoded) - (expected >= 0 ? expected : 0), bytes_ready = 0, bufsz, i;
     ssize_t ret;
 
@@ -510,7 +500,7 @@ int main(void)
     long pagesize = sysconf(_SC_PAGESIZE);
     assert(pagesize >= 1);
 
-    inputbuf = mmap(NULL, pagesize * 3, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    inputbuf = (char*)mmap(NULL, pagesize * 3, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
     assert(inputbuf != MAP_FAILED);
     inputbuf += pagesize * 2;
     ok(mprotect(inputbuf - pagesize, pagesize, PROT_READ | PROT_WRITE) == 0);

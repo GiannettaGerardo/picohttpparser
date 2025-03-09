@@ -10,7 +10,7 @@ All it does is accept pointer to buffer and the output structure, and setups the
 
 The code is widely deployed within Perl applications through popular modules that use it, including [Plack](https://metacpan.org/pod/Plack), [Starman](https://metacpan.org/pod/Starman), [Starlet](https://metacpan.org/pod/Starlet), [Furl](https://metacpan.org/pod/Furl).  It is also the HTTP/1 parser of [H2O](https://github.com/h2o/h2o).
 
-Check out [test.c] to find out how to use the parser.
+Check out [test.cpp] to find out how to use the parser.
 
 The software is dual-licensed under the Perl License or the MIT License.
 
@@ -23,44 +23,40 @@ The library exposes four functions: `phr_parse_request`, `phr_parse_response`, `
 
 The example below reads an HTTP request from socket `sock` using `read(2)`, parses it using `phr_parse_request`, and prints the details.
 
-```c
-char buf[4096], *method, *path;
-int pret, minor_version;
-struct phr_header headers[100];
-size_t buflen = 0, prevbuflen = 0, method_len, path_len, num_headers;
+```cpp
+int pret;
 ssize_t rret;
+HttpRequest request(30, 4000);
 
 while (1) {
     /* read the request */
-    while ((rret = read(sock, buf + buflen, sizeof(buf) - buflen)) == -1 && errno == EINTR)
-        ;
+    rret = read(sock, request.buffer.data() + request.buffer_len, request.buffer.size() - request.buffer_len);
+    if (rret == -1 && errno == EINTR)
+        continue;
     if (rret <= 0)
-        return IOError;
-    prevbuflen = buflen;
-    buflen += rret;
+        return 1;
+    request.prev_buffer_len = request.buffer_len;
+    request.buffer_len += rret;
     /* parse the request */
-    num_headers = sizeof(headers) / sizeof(headers[0]);
-    pret = phr_parse_request(buf, buflen, &method, &method_len, &path, &path_len,
-                             &minor_version, headers, &num_headers, prevbuflen);
+    pret = phr_parse_request(request);
     if (pret > 0)
         break; /* successfully parsed the request */
     else if (pret == -1)
-        return ParseError;
+        return 1;
     /* request is incomplete, continue the loop */
     assert(pret == -2);
-    if (buflen == sizeof(buf))
-        return RequestIsTooLongError;
+    if (request.buffer_len == request.buffer.size())
+        return 1;
 }
 
-printf("request is %d bytes long\n", pret);
-printf("method is %.*s\n", (int)method_len, method);
-printf("path is %.*s\n", (int)path_len, path);
-printf("HTTP version is 1.%d\n", minor_version);
-printf("headers:\n");
-for (i = 0; i != num_headers; ++i) {
-    printf("%.*s: %.*s\n", (int)headers[i].name_len, headers[i].name,
-           (int)headers[i].value_len, headers[i].value);
-}
+std::cout << "request is " << pret << " bytes long\n";
+std::cout << "method is " << request.method << "\n";
+std::cout << "path is " << request.path << "\n";
+std::cout << "HTTP version is 1." << request.minor_version << "\n";
+std::cout << "headers:\n";
+
+for (auto& pair : request.headers)
+    std::cout << pair.first << ": " << pair.second << "\n";
 ```
 
 ### phr_parse_response, phr_parse_headers
