@@ -28,9 +28,13 @@ int pret;
 ssize_t rret;
 HttpRequest request(30, 4000);
 
-while (1) {
+while (true) {
     /* read the request */
-    rret = read(sock, request.buffer.data() + request.buffer_len, request.buffer.size() - request.buffer_len);
+    rret = read(
+        sock, 
+        request.buffer.data() + request.buffer_len, 
+        request.buffer.size() - request.buffer_len
+    );
     if (rret == -1 && errno == EINTR)
         continue;
     if (rret <= 0)
