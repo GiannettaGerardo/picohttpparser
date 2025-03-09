@@ -34,7 +34,7 @@
 #include <x86intrin.h>
 #endif
 #endif
-#include "picohttpparser.h"
+#include "picohttpparser.hpp"
 
 #if __GNUC__ >= 3
 #define likely(x) __builtin_expect(!!(x), 1)
@@ -67,6 +67,30 @@
 #define EXPECT_CHAR(ch)                                                                                                            \
     CHECK_EOF();                                                                                                                   \
     EXPECT_CHAR_NO_CHECK(ch);
+
+#define ADVANCE_TOKEN_CPP(tok)                                                                                                     \
+    do {                                                                                                                           \
+        const char *tok_start = buf;                                                                                               \
+        static const char ALIGNED(16) ranges2[16] = "\000\040\177\177";                                                            \
+        int found2;                                                                                                                \
+        buf = findchar_fast(buf, buf_end, ranges2, 4, &found2);                                                                    \
+        if (!found2) {                                                                                                             \
+            CHECK_EOF();                                                                                                           \
+        }                                                                                                                          \
+        while (1) {                                                                                                                \
+            if (*buf == ' ') {                                                                                                     \
+                break;                                                                                                             \
+            } else if (unlikely(!IS_PRINTABLE_ASCII(*buf))) {                                                                      \
+                if ((unsigned char)*buf < '\040' || *buf == '\177') {                                                              \
+                    *ret = -1;                                                                                                     \
+                    return NULL;                                                                                                   \
+                }                                                                                                                  \
+            }                                                                                                                      \
+            ++buf;                                                                                                                 \
+            CHECK_EOF();                                                                                                           \
+        }                                                                                                                          \
+        tok = std::string_view(tok_start, buf - tok_start);                                                                        \
+    } while (0)
 
 #define ADVANCE_TOKEN(tok, toklen)                                                                                                 \
     do {                                                                                                                           \
@@ -194,7 +218,7 @@ FOUND_CTL:
     return buf;
 }
 
-static const char *is_complete(const char *buf, const char *buf_end, size_t last_len, int *ret)
+static const char *is_complete(const char *buf, const char *buf_end, uint32_t last_len, int *ret)
 {
     int ret_cnt = 0;
     buf = last_len < 3 ? buf : buf + last_len - 3;
@@ -277,6 +301,40 @@ static const char *parse_token(const char *buf, const char *buf_end, const char 
 }
 
 /* returned pointer is always within [buf, buf_end), or null */
+static const char *parse_token_cpp(const char *buf, const char *buf_end, std::string_view& token, char next_char,
+                               int *ret)
+{
+    /* We use pcmpestri to detect non-token characters. This instruction can take no more than eight character ranges (8*2*8=128
+     * bits that is the size of a SSE register). Due to this restriction, characters `|` and `~` are handled in the slow loop. */
+    static const char ALIGNED(16) ranges[] = "\x00 "  /* control chars and up to SP */
+                                             "\"\""   /* 0x22 */
+                                             "()"     /* 0x28,0x29 */
+                                             ",,"     /* 0x2c */
+                                             "//"     /* 0x2f */
+                                             ":@"     /* 0x3a-0x40 */
+                                             "[]"     /* 0x5b-0x5d */
+                                             "{\xff"; /* 0x7b-0xff */
+    const char *buf_start = buf;
+    int found;
+    buf = findchar_fast(buf, buf_end, ranges, sizeof(ranges) - 1, &found);
+    if (!found) {
+        CHECK_EOF();
+    }
+    while (1) {
+        if (*buf == next_char) {
+            break;
+        } else if (!token_char_map[(unsigned char)*buf]) {
+            *ret = -1;
+            return NULL;
+        }
+        ++buf;
+        CHECK_EOF();
+    }
+    token = std::string_view(buf_start, buf - buf_start);
+    return buf;
+}
+
+/* returned pointer is always within [buf, buf_end), or null */
 static const char *parse_http_version(const char *buf, const char *buf_end, int *minor_version, int *ret)
 {
     /* we want at least [HTTP/1.<two chars>] to try to parse */
@@ -292,6 +350,63 @@ static const char *parse_http_version(const char *buf, const char *buf_end, int 
     EXPECT_CHAR_NO_CHECK('1');
     EXPECT_CHAR_NO_CHECK('.');
     PARSE_INT(minor_version, 1);
+    return buf;
+}
+
+static const char *parse_headers_cpp(const char *buf, const char *buf_end, /*struct phr_header *headers, size_t *num_headers,
+                                 size_t max_headers,*/ int *ret, HttpRequest& request)
+{
+    while (true) {
+        CHECK_EOF();
+        if (*buf == '\015') {
+            ++buf;
+            EXPECT_CHAR('\012');
+            break;
+        } else if (*buf == '\012') {
+            ++buf;
+            break;
+        }
+        /*if (*num_headers == max_headers) {
+            *ret = -1;
+            return NULL;
+        }*/
+        std::string_view header_name;
+        if (!((! request.headers.empty()) && (*buf == ' ' || *buf == '\t'))) {
+            /* parsing name, but do not discard SP before colon, see
+             * http://www.mozilla.org/security/announce/2006/mfsa2006-33.html */
+            if ((buf = parse_token_cpp(buf, buf_end, header_name, ':', ret)) == NULL) {
+                return NULL;
+            }
+            if (header_name.empty()) {
+                *ret = -1;
+                return NULL;
+            }
+            ++buf;
+            for (;; ++buf) {
+                CHECK_EOF();
+                if (!(*buf == ' ' || *buf == '\t')) {
+                    break;
+                }
+            }
+        } else {
+            *ret = -1;
+            return NULL;
+        }
+        const char *value;
+        size_t value_len;
+        if ((buf = get_token_to_eol(buf, buf_end, &value, &value_len, ret)) == NULL) {
+            return NULL;
+        }
+        /* remove trailing SPs and HTABs */
+        const char *value_end = value + value_len;
+        for (; value_end != value; --value_end) {
+            const char c = *(value_end - 1);
+            if (!(c == ' ' || c == '\t')) {
+                break;
+            }
+        }
+        request.headers.emplace(header_name, std::string_view(value, value_end - value));
+    }
     return buf;
 }
 
@@ -352,9 +467,7 @@ static const char *parse_headers(const char *buf, const char *buf_end, struct ph
     return buf;
 }
 
-static const char *parse_request(const char *buf, const char *buf_end, const char **method, size_t *method_len, const char **path,
-                                 size_t *path_len, int *minor_version, struct phr_header *headers, size_t *num_headers,
-                                 size_t max_headers, int *ret)
+static const char *parse_request(const char *buf, const char *buf_end, int *ret, HttpRequest& request)
 {
     /* skip first empty line (some clients add CRLF after POST content) */
     CHECK_EOF();
@@ -366,23 +479,23 @@ static const char *parse_request(const char *buf, const char *buf_end, const cha
     }
 
     /* parse request line */
-    if ((buf = parse_token(buf, buf_end, method, method_len, ' ', ret)) == NULL) {
+    if ((buf = parse_token_cpp(buf, buf_end, request.method, ' ', ret)) == NULL) {
         return NULL;
     }
     do {
         ++buf;
         CHECK_EOF();
     } while (*buf == ' ');
-    ADVANCE_TOKEN(*path, *path_len);
+    ADVANCE_TOKEN_CPP(request.path);
     do {
         ++buf;
         CHECK_EOF();
     } while (*buf == ' ');
-    if (*method_len == 0 || *path_len == 0) {
+    if (request.method.size() == 0 || request.path.size() == 0) {
         *ret = -1;
         return NULL;
     }
-    if ((buf = parse_http_version(buf, buf_end, minor_version, ret)) == NULL) {
+    if ((buf = parse_http_version(buf, buf_end, &request.minor_version, ret)) == NULL) {
         return NULL;
     }
     if (*buf == '\015') {
@@ -395,35 +508,30 @@ static const char *parse_request(const char *buf, const char *buf_end, const cha
         return NULL;
     }
 
-    return parse_headers(buf, buf_end, headers, num_headers, max_headers, ret);
+    return parse_headers_cpp(buf, buf_end, ret, request);
 }
 
-int phr_parse_request(const char *buf_start, size_t len, const char **method, size_t *method_len, const char **path,
-                      size_t *path_len, int *minor_version, struct phr_header *headers, size_t *num_headers, size_t last_len)
+int phr_parse_request(HttpRequest& request) 
 {
-    const char *buf = buf_start, *buf_end = buf_start + len;
-    size_t max_headers = *num_headers;
+    const char *buf = request.buffer.data(), *buf_end = request.buffer.data() + request.buffer_len;
     int r;
 
-    *method = NULL;
-    *method_len = 0;
-    *path = NULL;
-    *path_len = 0;
-    *minor_version = -1;
-    *num_headers = 0;
+    request.method = "";
+    request.path = "";
+    request.minor_version = -1;
+    request.headers.clear();
 
     /* if last_len != 0, check if the request is complete (a fast countermeasure
        againt slowloris */
-    if (last_len != 0 && is_complete(buf, buf_end, last_len, &r) == NULL) {
+    if (request.prev_buffer_len != 0 && is_complete(buf, buf_end, request.prev_buffer_len, &r) == NULL) {
         return r;
     }
 
-    if ((buf = parse_request(buf, buf_end, method, method_len, path, path_len, minor_version, headers, num_headers, max_headers,
-                             &r)) == NULL) {
+    if ((buf = parse_request(buf, buf_end, &r, request)) == NULL) {
         return r;
     }
 
-    return (int)(buf - buf_start);
+    return (int)(buf - request.buffer.data());
 }
 
 static const char *parse_response(const char *buf, const char *buf_end, int *minor_version, int *status, const char **msg,

@@ -25,8 +25,8 @@
  */
 
 #include <assert.h>
-#include <stdio.h>
-#include "picohttpparser.h"
+#include <string.h>
+#include "picohttpparser.hpp"
 
 #define REQ                                                                                                                        \
     "GET /wp-content/uploads/2010/03/hello-kitty-darth-vader-pink.jpg HTTP/1.1\r\n"                                                \
@@ -46,19 +46,13 @@
 
 int main(void)
 {
-    const char *method;
-    size_t method_len;
-    const char *path;
-    size_t path_len;
-    int minor_version;
-    struct phr_header headers[32];
-    size_t num_headers;
     int i, ret;
+    HttpRequest request(32, sizeof(REQ));
+    request.buffer_len = sizeof(REQ) - 1;
+    memcpy(request.buffer.data(), REQ, sizeof(REQ));
 
     for (i = 0; i < 10000000; i++) {
-        num_headers = sizeof(headers) / sizeof(headers[0]);
-        ret = phr_parse_request(REQ, sizeof(REQ) - 1, &method, &method_len, &path, &path_len, &minor_version, headers, &num_headers,
-                                0);
+        ret = phr_parse_request(request);
         assert(ret == sizeof(REQ) - 1);
     }
 

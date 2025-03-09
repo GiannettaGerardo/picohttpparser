@@ -28,7 +28,10 @@
 #define picohttpparser_h
 
 #include <stdint.h>
+#include <string_view>
 #include <sys/types.h>
+#include <unordered_map>
+#include <vector>
 
 #ifdef _MSC_VER
 #define ssize_t intptr_t
@@ -37,6 +40,31 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+class HttpRequest {
+public:
+    std::string_view method;
+    std::string_view path;
+    int minor_version;
+    std::unordered_map<std::string_view, std::string_view> headers;
+    std::vector<char> buffer;
+    uint32_t buffer_len;
+    uint32_t prev_buffer_len;
+
+    HttpRequest()
+    :   minor_version{0},
+        buffer_len{0},
+        prev_buffer_len{0}
+    {}
+
+    HttpRequest(uint32_t headers_initial_len, uint32_t buffer_initial_len)
+    :   minor_version{0},
+        headers(headers_initial_len),
+        buffer(buffer_initial_len),
+        buffer_len{0},
+        prev_buffer_len{0}
+    {}
+};
 
 /* contains name and value of a header (name == NULL if is a continuing line
  * of a multiline header */
@@ -49,8 +77,7 @@ struct phr_header {
 
 /* returns number of bytes consumed if successful, -2 if request is partial,
  * -1 if failed */
-int phr_parse_request(const char *buf, size_t len, const char **method, size_t *method_len, const char **path, size_t *path_len,
-                      int *minor_version, struct phr_header *headers, size_t *num_headers, size_t last_len);
+int phr_parse_request(HttpRequest& request);
 
 /* ditto */
 int phr_parse_response(const char *_buf, size_t len, int *minor_version, int *status, const char **msg, size_t *msg_len,
